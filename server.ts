@@ -6,10 +6,23 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-const httpServer = createServer(express());
-const io = new Server(httpServer, { cors: { origin: '*' } });
+const app = express();
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
+const httpServer = createServer(app);
+const corsOrigin = process.env.FRONTEND_URL || '*';
+const io = new Server(httpServer, {
+  cors: { origin: corsOrigin },
+});
+
 const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 const chatNamespace = io.of('/chat');
+
+redisSub.on('error', (error: Error) => {
+  console.error('Redis subscriber error:', error.message || error.name);
+});
 
 redisSub.subscribe('SOCKET_EVENTS', (err) => {
   if (err) {
@@ -38,6 +51,33 @@ chatNamespace.on('connection', (socket: Socket) => {
     if (channelId) socket.join(channelId);
   });
 });
+
+let shuttingDown = false;
+function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down socket server...`);
+
+  void io.close(() => {
+    redisSub
+      .quit()
+      .catch(() => {
+        redisSub.disconnect();
+      })
+      .finally(() => {
+        httpServer.close(() => {
+          process.exit(0);
+        });
+      });
+  });
+
+  setTimeout(() => {
+    process.exit(1);
+  }, 5000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 const PORT = process.env.PORT || 5001;
 httpServer.listen(PORT, () => {
